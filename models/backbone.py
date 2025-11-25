@@ -63,10 +63,12 @@ class BackboneBase(nn.Module):
             if not train_backbone or 'layer2' not in name and 'layer3' not in name and 'layer4' not in name:
                 parameter.requires_grad_(False)
         if return_interm_layers:
-            return_layers = {"layer1": "0", "layer2": "1", "layer3": "2", "layer4": "3"}
+            return_layers = {"layer1": "0", "layer2": "1",
+                             "layer3": "2", "layer4": "3"}
         else:
             return_layers = {'layer4': "0"}
-        self.body = IntermediateLayerGetter(backbone, return_layers=return_layers)
+        self.body = IntermediateLayerGetter(
+            backbone, return_layers=return_layers)
         self.num_channels = num_channels
 
     def forward(self, tensor_list: NestedTensor):
@@ -75,20 +77,50 @@ class BackboneBase(nn.Module):
         for name, x in xs.items():
             m = tensor_list.mask
             assert m is not None
-            mask = F.interpolate(m[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
+            mask = F.interpolate(
+                m[None].float(), size=x.shape[-2:]).to(torch.bool)[0]
             out[name] = NestedTensor(x, mask)
         return out
 
 
+# /copy paste from origina dino
+def resnet50_dino(pretrained=True, norm_layer=None, **kwargs):
+    """
+    ResNet-50 pre-trained with DINO.
+    Achieves 75.3% top-1 accuracy on ImageNet linear evaluation benchmark.
+    """
+    # Get the standard ResNet-50 architecture
+    model = torchvision.models.resnet50(
+        pretrained=False, norm_layer=norm_layer, **kwargs)
+
+    # Replace the final fc layer with Identity (DINO removes the classification head)
+    model.fc = torch.nn.Identity()
+
+    # Load DINO pre-trained weights if requested
+    if pretrained:
+        state_dict = torch.hub.load_state_dict_from_url(
+            url="https://dl.fbaipublicfiles.com/dino/dino_resnet50_pretrain/dino_resnet50_pretrain.pth",
+            map_location="cpu",
+        )
+        model.load_state_dict(state_dict, strict=False)
+
+    return model
+
+
 class Backbone(BackboneBase):
     """ResNet backbone with frozen BatchNorm."""
+
     def __init__(self, name: str,
                  train_backbone: bool,
                  return_interm_layers: bool,
-                 dilation: bool):
-        backbone = getattr(torchvision.models, name)(
-            replace_stride_with_dilation=[False, False, dilation],
-            pretrained=is_main_process(), norm_layer=FrozenBatchNorm2d)
+                 dilation: bool,
+                 use_dino=False):
+        backbone = None
+        if use_dino:
+            backbone = resnet50_dino(norm_layer=FrozenBatchNorm2d)
+        else:
+            backbone = getattr(torchvision.models, name)(replace_stride_with_dilation=[False, False, dilation],
+                                                         pretrained=is_main_process(), norm_layer=FrozenBatchNorm2d)
         num_channels = 512 if name in ('resnet18', 'resnet34') else 2048
         super().__init__(backbone, train_backbone, num_channels, return_interm_layers)
 
@@ -113,7 +145,8 @@ def build_backbone(args):
     position_embedding = build_position_encoding(args)
     train_backbone = args.lr_backbone > 0
     return_interm_layers = args.masks
-    backbone = Backbone(args.backbone, train_backbone, return_interm_layers, args.dilation)
+    backbone = Backbone(args.backbone, train_backbone,
+                        return_interm_layers, args.dilation)
     model = Joiner(backbone, position_embedding)
     model.num_channels = backbone.num_channels
     return model
